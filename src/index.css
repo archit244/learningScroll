@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+/* Hide scrollbars */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Snap Scrolling */
+.snap-y-mandatory {
+  scroll-snap-type: y mandatory;
+}
+.snap-always {
+  scroll-snap-stop: always;
+}
+.snap-center {
+  scroll-snap-align: center;
+}
