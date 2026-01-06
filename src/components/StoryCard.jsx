@@ -1,204 +1,443 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import confetti from "canvas-confetti";
-import { X, Check, ArrowRight, AlertCircle, BookOpen, Layers } from "lucide-react";
+import { X, Check, ArrowRight, AlertCircle, Layers, Activity } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+
+// New Component Imports
+import DialogueView from "./slides/DialogueView";
+import ThinkTimer from "./slides/ThinkTimer";
+import CongratsSlide from "./slides/CongratsSlide";
+import SimulatorWrapper from "./simulators/SimulatorWrapper";
 
 export default function StoryCard({ data, onClose }) {
+  console.log("🔍 STORYCARD DATA:", data);
   const [slideIndex, setSlideIndex] = useState(0);
-  
-  // Quiz State
   const [selectedOption, setSelectedOption] = useState(null);
-  const [status, setStatus] = useState("idle"); // idle | correct | wrong
-  
-  // 1. DATA PREP
-  const rawData = data.lesson_data || data;
-  const slides = Array.isArray(rawData) ? rawData : (rawData.slides || []);
-  
-  // Fallback
-  if (slides.length === 0) {
-      slides.push({ type: "intro", text: data.title, emoji: "🎓" });
-      slides.push({ type: "fact", text: data.script || "No detailed notes available.", emoji: "📖" });
-      slides.push({ type: "outro", text: "Lesson Complete!" });
-  }
+  const [status, setStatus] = useState("idle");
+
+  // Normalize data structure (Handles both flat arrays and nested Python agent output)
+  const processData = (lessonData) => {
+    if (!lessonData) return [];
+    if (Array.isArray(lessonData)) return lessonData;
+    if (lessonData.slides && Array.isArray(lessonData.slides)) {
+      return lessonData.slides;
+    }
+    return [];
+  };
+
+  const slides = processData(data?.lesson_data);
+  if (slides.length === 0) return null;
 
   const currentSlide = slides[slideIndex];
+  // Determine if this slide contains a quiz for interaction state
+  const quizBlock = currentSlide.blocks?.find(b => b.type === 'quiz');
   const progress = ((slideIndex + 1) / slides.length) * 100;
+
+  // Dynamic Font Scaling handled via CSS clamp() now
 
   useEffect(() => {
     setSelectedOption(null);
     setStatus("idle");
   }, [slideIndex]);
 
-  // 2. CHECK LOGIC
   const handleCheck = () => {
     if (status !== 'idle') {
-        handleNext();
-        return;
+      handleNext();
+      return;
     }
-    if (currentSlide.type === 'quiz') {
-        const correctAnswer = currentSlide.answer;
-        const isCorrect = typeof correctAnswer === 'number' 
-            ? selectedOption === correctAnswer 
-            : selectedOption === Number(correctAnswer);
-        
-        if (isCorrect) {
-            setStatus("correct");
-            confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 }, colors: ['#000000', '#444444'] }); // Black/Gray confetti (Classy)
-        } else {
-            setStatus("wrong");
-        }
+    if (quizBlock) {
+      if (selectedOption === Number(quizBlock.answer)) {
+        setStatus("correct");
+        confetti({ particleCount: 100, spread: 70, origin: { y: 0.8 } });
+      } else {
+        setStatus("wrong");
+      }
     } else {
-        handleNext();
+      handleNext();
     }
   };
 
   const handleNext = () => {
-    if (slideIndex < slides.length - 1) {
-      setSlideIndex(prev => prev + 1);
-    } else {
-      onClose(); 
-    }
+    slideIndex < slides.length - 1 ? setSlideIndex(prev => prev + 1) : onClose();
+  };
+
+  // Reusable Markdown Styles to ensure "Next Line" structure and Bold Headers
+  const markdownStyles = {
+    h1: ({ node, ...props }) => (
+      <h1 className="font-extrabold text-black mt-6 mb-3 block tracking-tight" style={{ fontSize: '1.4em', fontWeight: '900', lineHeight: 1.2 }} {...props} />
+    ),
+    h2: ({ node, ...props }) => (
+      <h2 className="font-extrabold text-black mt-5 mb-2 block tracking-tight" style={{ fontSize: '1.25em', fontWeight: '900' }} {...props} />
+    ),
+    h3: ({ node, ...props }) => (
+      <h3 className="font-black text-black mt-6 mb-2 block uppercase tracking-tight" style={{ fontSize: '1.4em', fontWeight: '900' }} {...props} />
+    ),
+    strong: ({ node, ...props }) => (
+      <strong className="font-extrabold text-black" style={{ fontWeight: '900' }} {...props} />
+    ),
+    p: ({ node, ...props }) => (
+      <p className="text-gray-600 font-medium leading-relaxed mt-3 mb-3 block" style={{ fontSize: '1em' }} {...props} />
+    ),
+    ul: ({ node, ...props }) => <ul className="mt-4 space-y-2" {...props} />,
+    li: ({ node, ...props }) => (
+      <li className="flex items-start gap-3">
+        <span className="h-px w-3 bg-black mt-3 shrink-0" />
+        <span className="text-gray-700 font-bold leading-snug" style={{ fontSize: '1em' }}>{props.children}</span>
+      </li>
+    ),
   };
 
   return (
-    <motion.div 
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: "100%" }}
-      className="fixed inset-0 z-50 flex flex-col bg-[#FFFFFF] font-['Inter'] text-gray-900"
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      style={{
+        height: '100dvh',
+        width: '100vw',
+        position: 'fixed',
+        inset: 0,
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        backgroundColor: 'white',
+        zIndex: 9999,
+        fontFamily: 'Inter, sans-serif'
+      }}
     >
-      
-      {/* --- HEADER --- */}
-      <div className="flex items-center gap-6 p-6 w-full max-w-2xl mx-auto border-b border-gray-100">
-        <button onClick={onClose} className="text-gray-400 hover:text-black transition p-2 hover:bg-gray-100 rounded-full">
-           <X size={24} />
+      {/* --- TOP NAV --- */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '16px',
+        width: '100%',
+        maxWidth: '672px',
+        margin: '0 auto',
+        padding: '20px 20px 10px 20px',
+        flexShrink: 0
+      }}>
+        <button
+          onClick={onClose}
+          style={{
+            color: '#9ca3af',
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            transition: 'color 0.2s'
+          }}
+          onMouseEnter={(e) => e.target.style.color = '#000'}
+          onMouseLeave={(e) => e.target.style.color = '#9ca3af'}
+        >
+          <X size={24} strokeWidth={2.5} />
         </button>
-        {/* Minimalist Progress Bar */}
-        <div className="h-2 bg-gray-100 rounded-full flex-1 overflow-hidden">
-            <motion.div 
-                className="h-full bg-black rounded-full" 
-                animate={{ width: `${progress}%` }} 
-                transition={{ type: "spring", stiffness: 50 }}
-            />
+        <div style={{
+          height: '6px',
+          backgroundColor: '#f3f4f6',
+          borderRadius: '9999px',
+          flex: 1,
+          overflow: 'hidden'
+        }}>
+          <motion.div
+            style={{ height: '100%', backgroundColor: '#000' }}
+            animate={{ width: `${progress}%` }}
+          />
         </div>
       </div>
 
-      {/* --- MAIN CONTENT AREA --- */}
-      <div className="flex-1 overflow-y-auto w-full max-w-2xl mx-auto p-6 md:p-10 pb-40">
-        <AnimatePresence mode="wait">
+      {/* --- SCROLLABLE CONTENT AREA --- */}
+      <div style={{
+        flex: 1,
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        padding: '20px',
+        fontSize: 'clamp(1rem, 2.5vh, 1.8rem)'
+      }}>
+        <div style={{ width: '100%', maxWidth: '672px', margin: '0 auto' }}>
+          <AnimatePresence mode="wait">
             <motion.div
-                key={slideIndex}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                transition={{ duration: 0.2 }}
-                className="w-full"
+              key={slideIndex}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              transition={{ duration: 0.3 }}
             >
-                {/* 1. CONTENT SLIDES (Left Aligned, Professional) */}
-                {currentSlide.type !== 'quiz' && (
-                    <div className="flex flex-col gap-6">
-                        {/* Kicker / Tag */}
-                        <div className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase text-gray-400">
-                            <Layers size={14} />
-                            <span>{currentSlide.type === 'intro' ? "Overview" : "Key Concept"}</span>
-                        </div>
+              {/* Tag / Breadcrumb */}
+              {currentSlide.type !== 'congrats' && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontWeight: 900,
+                  letterSpacing: '0.25em',
+                  textTransform: 'uppercase',
+                  color: '#9ca3af',
+                  marginBottom: '12px',
+                  fontSize: '0.5em'
+                }}>
+                  {currentSlide.type === 'simulator' ? <Activity size={12} /> : <Layers size={12} />}
+                  <span>{(currentSlide.type || "Lesson").replace('_', ' ')}</span>
+                </div>
+              )}
 
-                        {/* Title */}
-                        <h2 className="text-3xl md:text-4xl font-bold leading-tight text-black tracking-tight">
-                             {currentSlide.text}
-                        </h2>
+              {/* Content Render Logic - Handles Strings and Arrays + Custom Symbols (@@/!!) */}
+              {(() => {
+                let blocksToRender = currentSlide.blocks || [];
 
-                        {/* Placeholder for denser content (We will update Python for this) */}
-                        <div className="prose prose-lg text-gray-600 leading-relaxed mt-4">
-                            <p>
-                                {currentSlide.type === 'intro' 
-                                    ? "This concept is fundamental to understanding the topic. Let's break down the mechanics." 
-                                    : "Notice how this connects to real-world applications. Understanding this layer allows you to predict system behavior."}
-                            </p>
-                        </div>
+                return (
+                  <>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                      {blocksToRender.map((block, i) => (
+                        <div key={i}>
+                          {(() => {
+                            switch (block.type) {
+                              case "conversation":
+                              case "dialogue":
+                                return <DialogueView dialogues={block.content} />;
 
-                        {/* Image/Visual Placeholder (Optional) */}
-                         <div className="w-full h-48 bg-gray-50 rounded-xl border border-gray-100 flex items-center justify-center text-gray-300 mt-4">
-                            {currentSlide.emoji || <BookOpen size={32} />}
-                        </div>
-                    </div>
-                )}
+                              case "delayed_question":
+                              case "think_timer":
+                                return (
+                                  <ThinkTimer
+                                    question={block.content || block.question}
+                                    answer={block.answer}
+                                    duration={block.duration}
+                                  />
+                                );
 
-                {/* 2. QUIZ SLIDES (Card UI) */}
-                {currentSlide.type === 'quiz' && (
-                    <div className="w-full">
-                         <div className="flex items-center gap-2 text-xs font-bold tracking-widest uppercase text-gray-400 mb-6">
-                            <AlertCircle size={14} />
-                            <span>Knowledge Check</span>
-                        </div>
+                              case "congrats":
+                                return <CongratsSlide data={block} />;
 
-                        <h2 className="text-2xl font-bold mb-8 text-black">
-                            {currentSlide.question}
-                        </h2>
-                        
-                        <div className="flex flex-col gap-3">
-                            {currentSlide.options?.map((opt, i) => (
-                                <button
-                                    key={i}
-                                    onClick={() => setSelectedOption(i)}
-                                    disabled={status !== 'idle'}
-                                    className={`
-                                        w-full p-5 rounded-lg border text-left text-lg font-medium transition-all
-                                        ${selectedOption === i 
-                                            ? "bg-gray-50 border-black ring-1 ring-black text-black"  // Selected
-                                            : "bg-white border-gray-200 text-gray-600 hover:border-gray-400 hover:text-black"} // Default
-                                    `}
-                                >
-                                    <div className="flex items-center gap-4">
-                                        <div className={`
-                                            w-6 h-6 rounded-full border flex items-center justify-center text-[10px]
-                                            ${selectedOption === i ? "bg-black border-black text-white" : "border-gray-300 text-gray-400"}
-                                        `}>
-                                            {String.fromCharCode(65 + i)}
-                                        </div>
-                                        {opt}
+                              case "quiz":
+                                return (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                    <h2 style={{
+                                      fontWeight: 900,
+                                      lineHeight: 1.2,
+                                      letterSpacing: '-0.025em',
+                                      color: '#000',
+                                      fontSize: '1.2em'
+                                    }}>
+                                      {block.question}
+                                    </h2>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                      {block.options?.map((opt, k) => (
+                                        <button
+                                          key={k}
+                                          onClick={() => setSelectedOption(k)}
+                                          disabled={status !== "idle"}
+                                          style={{
+                                            width: '100%',
+                                            padding: '12px',
+                                            borderRadius: '16px',
+                                            border: selectedOption === k ? '2px solid #000' : '2px solid #f3f4f6',
+                                            textAlign: 'left',
+                                            fontWeight: 700,
+                                            transition: 'all 0.2s',
+                                            backgroundColor: selectedOption === k ? '#000' : '#fff',
+                                            color: selectedOption === k ? '#fff' : '#6b7280',
+                                            cursor: status === "idle" ? 'pointer' : 'default',
+                                            fontSize: '0.8em'
+                                          }}
+                                        >
+                                          {opt}
+                                        </button>
+                                      ))}
                                     </div>
-                                </button>
-                            ))}
+                                  </div>
+                                );
+
+                              case "simulator":
+                                return (
+                                  <div style={{
+                                    marginTop: '16px',
+                                    borderRadius: '24px',
+                                    border: '2px solid #f3f4f6',
+                                    overflow: 'hidden',
+                                    backgroundColor: '#f9fafb'
+                                  }}>
+                                    <SimulatorWrapper data={block.interactionData} />
+                                  </div>
+                                );
+
+                              case "markdown":
+                              default:
+                                return (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                    <div className="prose prose-lg max-w-none">
+                                      {(() => {
+                                        // Handle input: Explicitly handle valid Array or String
+                                        let lines = [];
+                                        if (Array.isArray(block.content)) {
+                                          // Flatten array input
+                                          lines = block.content;
+                                        } else if (typeof block.content === 'string') {
+                                          // Split string input
+                                          lines = block.content.split('\n');
+                                        }
+
+                                        const elements = [];
+                                        let currentMarkdown = "";
+
+                                        lines.forEach((line, lineIdx) => {
+                                          const trimmed = line.trim();
+
+                                          // 1. Custom Symbol: @@ -> H2 (Subtitle)
+                                          if (trimmed.startsWith('@@')) {
+                                            if (currentMarkdown) {
+                                              elements.push(
+                                                <ReactMarkdown key={`md-${lineIdx}-pre-h2-custom`} components={markdownStyles}>
+                                                  {currentMarkdown}
+                                                </ReactMarkdown>
+                                              );
+                                              currentMarkdown = "";
+                                            }
+                                            elements.push(
+                                              <h2 key={`h2-${lineIdx}-custom`} className="font-extrabold text-black mt-5 mb-2 block tracking-tight" style={{ fontSize: '1.25em', fontWeight: '900' }}>
+                                                {trimmed.substring(2).trim()}
+                                              </h2>
+                                            );
+                                          }
+                                          // 2. Custom Symbol: !! -> H1 (Title)
+                                          else if (trimmed.startsWith('!!')) {
+                                            if (currentMarkdown) {
+                                              elements.push(
+                                                <ReactMarkdown key={`md-${lineIdx}-pre-h1-custom`} components={markdownStyles}>
+                                                  {currentMarkdown}
+                                                </ReactMarkdown>
+                                              );
+                                              currentMarkdown = "";
+                                            }
+                                            elements.push(
+                                              <h1 key={`h1-${lineIdx}-custom`} className="font-extrabold text-black mt-6 mb-3 block tracking-tight" style={{ fontSize: '1.4em', fontWeight: '900', lineHeight: 1.2 }}>
+                                                {trimmed.substring(2).trim()}
+                                              </h1>
+                                            );
+                                          }
+                                          // 3. Legacy: ## -> H2 (Subtitle)
+                                          else if (trimmed.startsWith('##')) {
+                                            if (currentMarkdown) {
+                                              elements.push(
+                                                <ReactMarkdown key={`md-${lineIdx}-pre-lh2`} components={markdownStyles}>
+                                                  {currentMarkdown}
+                                                </ReactMarkdown>
+                                              );
+                                              currentMarkdown = "";
+                                            }
+                                            elements.push(
+                                              <h2 key={`h2-${lineIdx}`} className="font-extrabold text-black mt-5 mb-2 block tracking-tight" style={{ fontSize: '1.25em', fontWeight: '900' }}>
+                                                {trimmed.substring(2).trim()}
+                                              </h2>
+                                            );
+                                          }
+                                          // 4. Legacy: # -> H1 (Title)
+                                          else if (trimmed.startsWith('#')) {
+                                            if (currentMarkdown) {
+                                              elements.push(
+                                                <ReactMarkdown key={`md-${lineIdx}-pre-lh1`} components={markdownStyles}>
+                                                  {currentMarkdown}
+                                                </ReactMarkdown>
+                                              );
+                                              currentMarkdown = "";
+                                            }
+                                            elements.push(
+                                              <h1 key={`h1-${lineIdx}`} className="font-extrabold text-black mt-6 mb-3 block tracking-tight" style={{ fontSize: '1.4em', fontWeight: '900', lineHeight: 1.2 }}>
+                                                {trimmed.substring(1).trim()}
+                                              </h1>
+                                            );
+                                          }
+                                          else {
+                                            // Accumulate normal lines
+                                            currentMarkdown += line + "\n";
+                                          }
+                                        });
+
+                                        // Final flush of remaining text
+                                        if (currentMarkdown) {
+                                          elements.push(
+                                            <ReactMarkdown key="md-end" components={markdownStyles}>
+                                              {currentMarkdown}
+                                            </ReactMarkdown>
+                                          );
+                                        }
+
+                                        return elements;
+                                      })()}
+                                    </div>
+                                  </div>
+                                );
+                            }
+                          })()}
                         </div>
+                      ))}
                     </div>
-                )}
+                  </>
+                );
+              })()}
             </motion.div>
-        </AnimatePresence>
+          </AnimatePresence>
+        </div>
       </div>
 
-      {/* --- FOOTER (ACTION BAR) --- */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 p-6 md:p-8">
-          <div className="max-w-2xl mx-auto w-full flex flex-col gap-4">
-            
-            {/* FEEDBACK MESSAGE */}
-            {status !== 'idle' && (
-                <motion.div 
-                    initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }}
-                    className={`flex items-center gap-3 p-4 rounded-lg text-sm font-semibold
-                        ${status === 'correct' ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"}
-                    `}
-                >
-                     {status === 'correct' ? <Check size={18} /> : <AlertCircle size={18} />}
-                     {status === 'correct' ? "Correct. Well done." : "Incorrect. Try to recall the previous concept."}
-                </motion.div>
-            )}
+      {/* --- FIXED FOOTER (OUTSIDE SCROLLABLE AREA) --- */}
+      <div style={{
+        width: '100%',
+        maxWidth: '672px',
+        margin: '0 auto',
+        padding: '10px 20px 20px 20px',
+        flexShrink: 0
+      }}>
+        {status !== "idle" && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            style={{
+              marginBottom: '12px',
+              padding: '12px',
+              borderRadius: '16px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              fontSize: '0.75rem',
+              fontWeight: 900,
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+              backgroundColor: status === "correct" ? '#f0fdf4' : '#fef2f2',
+              color: status === "correct" ? '#16a34a' : '#dc2626',
+              border: status === "correct" ? '1px solid #bbf7d0' : '1px solid #fecaca'
+            }}
+          >
+            {status === "correct" ? <Check size={16} strokeWidth={3} /> : <AlertCircle size={16} strokeWidth={3} />}
+            {status === "correct" ? "Insight correct" : "Check the logic again"}
+          </motion.div>
+        )}
 
-            {/* MAIN BUTTON */}
-            <button 
-                onClick={handleCheck}
-                className={`
-                    w-full py-4 rounded-lg text-sm font-bold tracking-wide uppercase transition-all flex items-center justify-center gap-2
-                    ${status === 'correct' 
-                        ? "bg-black text-white hover:bg-gray-800" 
-                        : status === 'wrong'
-                        ? "bg-gray-200 text-gray-500" // Disabled look for wrong
-                        : "bg-black text-white hover:bg-gray-800 shadow-lg shadow-gray-200"}
-                `}
-            >
-                {status === 'idle' ? "Check Answer" : "Continue"} <ArrowRight size={16} />
-            </button>
-          </div>
+        <button
+          onClick={handleCheck}
+          disabled={quizBlock && selectedOption === null}
+          style={{
+            width: '100%',
+            padding: '16px',
+            borderRadius: '16px',
+            backgroundColor: '#000',
+            color: '#fff',
+            fontSize: '0.75rem',
+            fontWeight: 900,
+            letterSpacing: '0.2em',
+            textTransform: 'uppercase',
+            transition: 'all 0.2s',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '12px',
+            opacity: (quizBlock && selectedOption === null) ? 0.1 : 1,
+            cursor: (quizBlock && selectedOption === null) ? 'not-allowed' : 'pointer',
+            border: 'none',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.2)'
+          }}
+        >
+          {status === "idle" ? "Check" : "Continue"} <ArrowRight size={18} strokeWidth={3} />
+        </button>
       </div>
     </motion.div>
   );

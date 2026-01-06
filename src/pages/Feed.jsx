@@ -1,60 +1,196 @@
-import React, { useEffect, useState, useRef } from "react";
-import { useParams } from "react-router-dom"; 
+import React, { useEffect, useState, useRef, useCallback } from "react";
+import { useParams } from "react-router-dom";
 import { AnimatePresence } from "framer-motion";
 import { Heart, MessageCircle, Bookmark, Volume2, VolumeX, ChevronUp, ChevronDown, Music } from "lucide-react";
 import { supabase } from "../supabaseClient";
-import StoryCard from "../components/StoryCard"; 
+import StoryCard from "../components/StoryCard";
+import ReelCard from "../components/ReelCard";
+import ErrorBoundary from "../components/ErrorBoundary";
 
-const PAGE_SIZE = 5;
+const BATCH_SIZE = 3; // Instagram-style: Load 3 reels at a time
+const MEMORY_THRESHOLD = 2; // Keep current +/- 2 in memory
 
 export default function Feed() {
-  const { category } = useParams(); 
-  
-  const [lessons, setLessons] = useState([]);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const { category } = useParams();
+
+  const [allLessons, setAllLessons] = useState([]); // All loaded lessons
+  const [displayedLessons, setDisplayedLessons] = useState([]); // Currently displayed lessons
+  const [activeId, setActiveId] = useState(null); // Single-ID Authority
   const [showCard, setShowCard] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
-  const [loading, setLoading] = useState(true); 
-  
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+
   // Pagination
-  const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
 
   // Interaction
   const [likedIDs, setLikedIDs] = useState(new Set());
   const [savedIDs, setSavedIDs] = useState(new Set());
-  
-  const videoRefs = useRef([]);
+
   const containerRef = useRef(null);
+  const observerRef = useRef(null);
+  const sentinelRef = useRef(null);
+  const sentinelObserverRef = useRef(null);
+  const isFetching = useRef(false); // Atomic lock for fetching
+  const lastTriggeredCountRef = useRef(0); // Track when we last triggered
+  const displayedLessonsRef = useRef([]); // Always current value
+  const triggeredIndicesRef = useRef(new Set()); // Track triggered indices to prevent loops
+
+  // Reset scroll to top on route change (Snap-to-New)
+  // const offsetRef = useRef(0); // Removed for Length-Based Truth
+
+  // Reset scroll and cursor on route change
+  useEffect(() => {
+    if (containerRef.current) containerRef.current.scrollTop = 0;
+    // offsetRef.current = 0; // Removed
+  }, [category]);
 
   useEffect(() => {
-    setLessons([]);
-    setPage(0);
+    setAllLessons([]);
+    setDisplayedLessons([]);
     setHasMore(true);
-    setActiveIndex(0);
-    setLoading(true); 
-    loadLessons(0);
+    setActiveId(null);
+    setLoading(true);
+    // offsetRef.current = 0; // Removed
+    isFetching.current = false;
+    lastTriggeredCountRef.current = 0; // Reset trigger tracking
+    triggeredIndicesRef.current.clear(); // Clear triggered indices
+    loadLessons(true);
     fetchUserInteractions();
-  }, [category]); 
+  }, [category]);
 
-  const loadLessons = async (pageIndex) => {
-    let query = supabase
-      .from("lessons")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .range(pageIndex * PAGE_SIZE, (pageIndex + 1) * PAGE_SIZE - 1);
+  // Keep ref in sync with state
+  useEffect(() => {
+    displayedLessonsRef.current = displayedLessons;
+  }, [displayedLessons]);
 
-    if (category) {
-      query = query.ilike('category', category); 
+
+  /* --- TIKTOK-STYLE INFINITE SCROLL ENGINE --- */
+  const loadLessons = useCallback(async (isInitial = false) => {
+    if (isFetching.current) {
+      console.log("⏸️ Already fetching, skipping...");
+      return;
     }
+    isFetching.current = true;
 
-    const { data } = await query;
+    try {
+      // Get the last DISPLAYED lesson's ID using REF (not state)
+      const currentDisplayed = displayedLessonsRef.current;
+      const lastId = currentDisplayed.length > 0 ? currentDisplayed[currentDisplayed.length - 1].id : null;
+      console.log(`🔄 Fetching batch (Last ID: ${lastId || 'initial'}, Displayed: ${currentDisplayed.length})...`);
 
-    if (!data || data.length < PAGE_SIZE) setHasMore(false);
+      // Cursor-based pagination: Use last ID instead of range
+      let query = supabase
+        .from("lessons")
+        .select("*")
+        .order("id", { ascending: false }) // LIFO: Newest First
+        .limit(BATCH_SIZE);
 
-    setLessons((prev) => (pageIndex === 0 ? (data || []) : [...prev, ...(data || [])]));
-    setLoading(false); 
-  };
+      // If not initial, fetch items with ID less than the last one we have
+      if (!isInitial && lastId) {
+        query = query.lt('id', lastId);
+      }
+
+      if (category) query = query.ilike('category', category);
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      console.log(`✅ Fetched ${data?.length || 0} items`, data?.map(d => d.id));
+
+      if (data && data.length > 0) {
+        setAllLessons(prev => {
+          const existingIds = new Set(prev.map(i => i.id));
+          const newItems = data.filter(item => !existingIds.has(item.id));
+          const unique = isInitial ? newItems : [...prev, ...newItems];
+          // LIFO: Keep descending order (newest first)
+          unique.sort((a, b) => b.id - a.id);
+          return unique;
+        });
+
+        // CRITICAL FIX: Update displayedLessons for BOTH initial and subsequent loads
+        if (isInitial) {
+          setDisplayedLessons(data.slice(0, BATCH_SIZE));
+        } else {
+          // Add new items to displayed list
+          setDisplayedLessons(prev => [...prev, ...data]);
+        }
+      }
+
+      if (!data || data.length < BATCH_SIZE) {
+        setHasMore(false);
+      }
+
+    } catch (err) {
+      console.error("❌ Fetch Error:", err);
+    } finally {
+      setLoading(false);
+      setLoadingMore(false);
+      isFetching.current = false;
+    }
+  }, [category]); // ONLY category as dependency, NOT displayedLessons
+
+  const loadNextBatch = useCallback(() => {
+    if (isFetching.current || !hasMore) return;
+
+    console.log("📦 loadNextBatch called");
+    // Simply fetch the next batch from database
+    setLoadingMore(true);
+    loadLessons(false);
+  }, [hasMore, loadLessons]);
+
+
+  /* --- STANDARD OBSERVER (Strict Authority) --- */
+  useEffect(() => {
+    // 1. Disconnect Old
+    if (observerRef.current) observerRef.current.disconnect();
+
+    const options = {
+      root: containerRef.current,
+      threshold: 0.5, // Standard: 50% visible means "Active"
+    };
+
+    observerRef.current = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const id = Number(entry.target.dataset.id);
+          const index = Number(entry.target.dataset.index);
+
+          if (id) {
+            setActiveId(id);
+
+            // LOGIC FIX: Trigger at 2nd reel of ANY batch
+            // BATCH_SIZE = 3. Trigger at index 1, 4, 7, etc.
+            // Formula: index % BATCH_SIZE === (BATCH_SIZE - 2)
+            // (1 % 3 === 1) -> True
+            // (4 % 3 === 1) -> True
+            const isTriggerPoint = index % BATCH_SIZE === (BATCH_SIZE - 2);
+
+            // Only trigger if:
+            // 1. It is a trigger point index
+            // 2. We haven't triggered this index before (deduplication)
+            // 3. Not currently fetching
+            // 4. Has more data
+            if (isTriggerPoint && !triggeredIndicesRef.current.has(index)) {
+              if (!isFetching.current && hasMore) {
+                console.log(`🚀 Triggering next batch from Reel ${index + 1} (Index ${index})`);
+                triggeredIndicesRef.current.add(index); // Mark triggered immediately
+                loadNextBatch();
+              }
+            }
+          }
+        }
+      });
+    }, options);
+
+    // 2. Observe New Elements
+    const cards = document.querySelectorAll('.reel-card-container');
+    cards.forEach(card => observerRef.current.observe(card));
+
+    return () => observerRef.current?.disconnect();
+  }, [displayedLessons.length, loadNextBatch, hasMore]); // Only re-run when length changes
+
 
   const fetchUserInteractions = async () => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -71,179 +207,123 @@ export default function Feed() {
   };
 
   const scrollToVideo = (index) => {
-    if (index < 0 || index >= lessons.length) return;
-    const container = containerRef.current;
-    if (container) {
-      container.scrollTo({ top: index * container.clientHeight, behavior: "smooth" });
-    }
+    if (index < 0 || index >= displayedLessons.length) return;
+    if (containerRef.current) containerRef.current.scrollTo({ top: index * containerRef.current.clientHeight, behavior: "smooth" });
   };
 
-  const handleScroll = (e) => {
-    const index = Math.round(e.target.scrollTop / e.target.clientHeight);
-    if (index !== activeIndex) {
-      setActiveIndex(index);
-      videoRefs.current.forEach((v) => v && v.pause());
-      if (videoRefs.current[index]) {
-        videoRefs.current[index].currentTime = 0;
-        videoRefs.current[index].play().catch(() => setIsMuted(true));
-      }
-      if (hasMore && index >= lessons.length - 2) {
-        const nextPage = page + 1;
-        setPage(nextPage);
-        loadLessons(nextPage);
-      }
-    }
+  // Removed Sentinel Observer completely
+  // Sentinel was causing race conditions. Replaced by Active-Index Trigger above.
+
+
+  // Simplified Windowing: Keep current +/- 2
+  const isWithinWindow = (index) => {
+    const activeIndex = displayedLessons.findIndex(l => l.id === activeId);
+    if (activeIndex === -1) return index < 3;
+    return Math.abs(index - activeIndex) <= MEMORY_THRESHOLD;
   };
 
   const handleInteraction = async (lessonId, type) => {
+    // ... (Implementation unchanged via prop pass)
+    // I'll assume handleInteraction is safe to omit from this massive replace block if I'm not changing it, 
+    // BUT replace_file_content needs strict context. I should probably include it or ensure alignment.
+    // Wait, replacementContent replaces the range. 
+    // I will include handleInteraction to be safe or cut before it.
+    // The instruction block targets EndLine: 343 which essentially covers the whole logic area.
+    // I will implement handleInteraction here to verify it exists in the replacement.
+
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return alert("Please log in!");
     const isActive = type === 'like' ? likedIDs.has(lessonId) : savedIDs.has(lessonId);
-    
-    if (type === 'like') {
-      setLikedIDs(prev => { const newSet = new Set(prev); isActive ? newSet.delete(lessonId) : newSet.add(lessonId); return newSet; });
-    } else {
-      setSavedIDs(prev => { const newSet = new Set(prev); isActive ? newSet.delete(lessonId) : newSet.add(lessonId); return newSet; });
-    }
+    const setFn = type === 'like' ? setLikedIDs : setSavedIDs;
 
-    if (isActive) {
-      await supabase.from("user_interactions").delete().match({ user_id: user.id, lesson_id: lessonId, interaction_type: type });
-    } else {
-      await supabase.from("user_interactions").insert({ user_id: user.id, lesson_id: lessonId, interaction_type: type });
-    }
+    setFn(prev => { const newSet = new Set(prev); isActive ? newSet.delete(lessonId) : newSet.add(lessonId); return newSet; });
+
+    if (isActive) await supabase.from("user_interactions").delete().match({ user_id: user.id, lesson_id: lessonId, interaction_type: type });
+    else await supabase.from("user_interactions").insert({ user_id: user.id, lesson_id: lessonId, interaction_type: type });
   };
 
+  if (!displayedLessons) return null;
+
   return (
-    // LIGHT MODE BACKGROUND
-    <div className="w-full h-full flex justify-center items-center bg-[#F0F2F5] font-['Nunito']">
-      
-      <div 
-        ref={containerRef}
-        className="h-full w-full max-w-[400px] md:max-w-none md:w-auto overflow-y-scroll snap-y snap-mandatory no-scrollbar flex flex-col items-center"
-        onScroll={handleScroll}
-      >
-        
-        {/* --- LIGHT MODE SKELETONS --- */}
-        {loading && lessons.length === 0 && (
-           <div className="h-full w-full flex flex-col gap-4 items-center justify-center pt-10">
+    <ErrorBoundary>
+      <div className="w-full h-full flex justify-center items-center bg-[#F0F2F5] font-['Nunito']">
+
+        <div
+          ref={containerRef}
+          className="h-full w-full max-w-[400px] md:max-w-none md:w-auto overflow-y-scroll snap-y snap-mandatory no-scrollbar flex flex-col items-center pt-[40px] pb-[40px]"
+          style={{ scrollSnapStop: 'always' }}
+        >
+
+          {loading && displayedLessons.length === 0 && (
+            <div className="h-[95vh] w-full md:w-[850px] snap-center snap-always flex items-center justify-center my-10 p-4 gap-6 scroll-snap-align-center">
               {[1, 2].map((i) => (
-                <div key={i} className="w-full md:w-[350px] h-[620px] bg-white rounded-2xl shadow-lg border border-gray-200 relative overflow-hidden shrink-0">
+                <div key={i} className="w-full md:w-[350px] h-[700px] bg-white rounded-2xl shadow-lg border border-gray-200 relative overflow-hidden shrink-0">
                   <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-gray-100 to-transparent skew-x-12 opacity-50 animate-pulse" />
-                  <div className="absolute bottom-10 left-4 w-3/4 h-6 bg-gray-200 rounded" />
-                  <div className="absolute bottom-20 left-4 w-1/4 h-4 bg-gray-200 rounded" />
                 </div>
               ))}
-           </div>
-        )}
+            </div>
+          )}
 
-        {!loading && lessons.length === 0 && (
+          {!loading && displayedLessons.length === 0 && (
             <div className="h-screen flex flex-col items-center justify-center text-gray-500 gap-2">
-                <span className="text-4xl">🤷‍♂️</span>
-                <p>{category ? `No lessons found for ${category}` : "No videos yet."}</p>
+              <span className="text-4xl">🤷‍♂️</span>
+              <p>{category ? `No lessons found for ${category}` : "No videos yet."}</p>
             </div>
-        )}
+          )}
 
-        {/* --- FEED --- */}
-        {lessons.map((lesson, index) => (
-          <div key={lesson.id} className="h-full w-full md:h-[90vh] md:w-[850px] snap-center snap-always flex items-center justify-center p-4 gap-6">
-            
-            {/* VIDEO CARD (Remains Dark inside, but container is clean) */}
-            <div className="relative h-full w-full md:w-[350px] md:h-[620px] bg-black rounded-3xl overflow-hidden shadow-2xl flex-shrink-0 group">
-              
-              {/* Audio */}
-              <div className="absolute top-4 right-4 z-20 opacity-0 group-hover:opacity-100 transition duration-300">
-                <button onClick={() => setIsMuted(!isMuted)} className="bg-black/50 backdrop-blur p-2 rounded-full text-white hover:bg-black/70 active:scale-90 transition">
-                   {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
-                </button>
+          {displayedLessons.map((lesson, index) => {
+            if (!lesson) return null;
+            const inWindow = isWithinWindow(index);
+
+            return (
+              <div
+                key={lesson?.id || `lesson-${index}`}
+                className="reel-card-container"
+                data-index={index}
+                data-id={lesson?.id}
+                style={{ transform: "translateZ(0)", willChange: "transform", scrollSnapStop: "always" }}
+              >
+                <ReelCard
+                  lesson={lesson}
+                  index={index}
+                  isActive={lesson?.id === activeId}
+                  isMuted={isMuted}
+                  setIsMuted={setIsMuted}
+                  likedIDs={likedIDs}
+                  savedIDs={savedIDs}
+                  handleInteraction={handleInteraction}
+                  onShowCard={() => setShowCard(true)}
+                  onScrollTo={scrollToVideo}
+                  isFirst={index === 0}
+                  isLast={index === displayedLessons.length - 1}
+                  shouldRender={inWindow}
+                />
               </div>
+            );
+          })}
 
-              <video
-                ref={(el) => (videoRefs.current[index] = el)}
-                src={lesson.video_url}
-                className="h-full w-full object-cover"
-                loop
-                playsInline
-                muted={isMuted}
-                onClick={() => handleInteraction(lesson.id, 'like')} 
-              />
-              
-              <div className="absolute bottom-0 left-0 w-full h-40 bg-gradient-to-t from-black/90 to-transparent pointer-events-none" />
-
-              {/* Text Info */}
-              <div className="absolute bottom-4 left-4 right-4 text-white z-20">
-                <div className="flex items-center gap-2 mb-3">
-                   <div className="w-8 h-8 rounded-full bg-yellow-500 border-2 border-white shadow-sm"></div>
-                   <span className="font-bold text-sm hover:underline cursor-pointer text-white">LearningScroll</span>
-                   {category && <span className="text-[10px] uppercase border border-white/30 px-2 py-0.5 rounded backdrop-blur-sm">{category}</span>}
+          {loadingMore && (
+            <div className="h-[95vh] w-full md:w-[850px] snap-center snap-always flex items-center justify-center my-10 p-4 gap-6">
+              <div className="w-full md:w-[350px] h-[700px] bg-black rounded-3xl flex items-center justify-center">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="w-12 h-12 border-4 border-white/20 border-t-white rounded-full animate-spin"></div>
+                  <p className="text-white/60 text-sm">Loading...</p>
                 </div>
-                <h2 className="text-sm font-normal mb-2 leading-snug text-white">{lesson.title}</h2>
-                <div className="flex items-center gap-2 text-xs text-white/70">
-                    <Music size={12} /> <span className="truncate">Original Audio • Explained by AI</span>
-                </div>
               </div>
             </div>
+          )}
+        </div>
 
-            {/* SIDEBAR ACTIONS (LIGHT MODE COLORS) */}
-            <div className="hidden md:flex flex-col gap-6 justify-end pb-8 h-[620px]">
-              
-              {/* Like */}
-              <div className="flex flex-col items-center gap-1">
-                <button 
-                  onClick={() => handleInteraction(lesson.id, 'like')} 
-                  className={`p-3.5 rounded-full shadow-lg border border-gray-100 transition active:scale-90 duration-200 
-                  ${likedIDs.has(lesson.id) ? "bg-red-50 text-red-500 border-red-100" : "bg-white text-gray-700 hover:bg-gray-50"}`}
-                >
-                  <Heart size={26} fill={likedIDs.has(lesson.id) ? "currentColor" : "none"} />
-                </button>
-                <span className="text-xs text-gray-500 font-bold">{likedIDs.has(lesson.id) ? "1.2k" : "1.1k"}</span>
-              </div>
 
-              {/* Comments */}
-              <div className="flex flex-col items-center gap-1">
-                <button className="p-3.5 rounded-full bg-white text-gray-700 shadow-lg border border-gray-100 hover:bg-gray-50 transition active:scale-90 duration-200">
-                  <MessageCircle size={26} />
-                </button>
-                <span className="text-xs text-gray-500 font-bold">45</span>
-              </div>
-
-              {/* Save */}
-              <div className="flex flex-col items-center gap-1">
-                <button onClick={() => handleInteraction(lesson.id, 'save')} className="p-3.5 rounded-full bg-white text-gray-700 shadow-lg border border-gray-100 hover:bg-gray-50 transition active:scale-90 duration-200">
-                   <Bookmark size={26} className={savedIDs.has(lesson.id) ? "text-yellow-500 fill-yellow-500" : "text-gray-700"} />
-                </button>
-                <span className="text-xs text-gray-500 font-bold">Save</span>
-              </div>
-
-              {/* NOTES BUTTON (The Star of Show) */}
-              <div className="flex flex-col items-center gap-1 mt-4">
-                <button 
-                   onClick={() => setShowCard(true)} 
-                   className="w-12 h-12 rounded-2xl border-2 border-white shadow-xl overflow-hidden hover:scale-105 active:scale-90 transition duration-200"
-                >
-                  <img src={`https://ui-avatars.com/api/?name=${lesson.category || 'Notes'}&background=random&color=fff`} alt="Notes" />
-                </button>
-                <span className="text-[10px] uppercase font-black text-gray-400 tracking-wider">Learn</span>
-              </div>
-
-            </div>
-
-            {/* NAVIGATION ARROWS */}
-            <div className="hidden xl:flex flex-col gap-4 ml-4">
-               <button onClick={() => scrollToVideo(index - 1)} disabled={index === 0} className="p-3 bg-white text-gray-700 shadow-md rounded-full hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed active:scale-90 transition"><ChevronUp size={20} /></button>
-               <button onClick={() => scrollToVideo(index + 1)} disabled={index === lessons.length - 1} className="p-3 bg-white text-gray-700 shadow-md rounded-full hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed active:scale-90 transition"><ChevronDown size={20} /></button>
-            </div>
-          </div>
-        ))}
+        <AnimatePresence>
+          {showCard && activeId && (
+            <StoryCard
+              data={displayedLessons.find(l => l.id === activeId)}
+              onClose={() => setShowCard(false)}
+            />
+          )}
+        </AnimatePresence>
       </div>
-
-      <AnimatePresence>
-        {showCard && (
-          <StoryCard 
-            data={lessons[activeIndex]} 
-            onClose={() => setShowCard(false)} 
-          />
-        )}
-      </AnimatePresence>
-    </div>
+    </ErrorBoundary>
   );
 }
